@@ -29,7 +29,6 @@ import io.rsocket.frame.RequestNFrameCodec;
 import io.rsocket.frame.RequestStreamFrameCodec;
 import io.rsocket.frame.decoder.PayloadDecoder;
 import io.rsocket.internal.UnboundedProcessor;
-import io.rsocket.lease.ResponderLeaseHandler;
 import java.nio.channels.ClosedChannelException;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
@@ -37,7 +36,6 @@ import java.util.function.Supplier;
 import org.reactivestreams.Publisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -51,9 +49,6 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
   private final DuplexConnection connection;
   private final RSocket requestHandler;
 
-  private final ResponderLeaseHandler leaseHandler;
-  private final Disposable leaseHandlerDisposable;
-
   private volatile Throwable terminationError;
   private static final AtomicReferenceFieldUpdater<RSocketResponder, Throwable> TERMINATION_ERROR =
       AtomicReferenceFieldUpdater.newUpdater(
@@ -63,16 +58,13 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
       DuplexConnection connection,
       RSocket requestHandler,
       PayloadDecoder payloadDecoder,
-      ResponderLeaseHandler leaseHandler,
       int mtu,
       int maxFrameLength,
       int maxInboundPayloadSize) {
     super(mtu, maxFrameLength, maxInboundPayloadSize, payloadDecoder, connection.alloc(), null);
+
     this.connection = connection;
-
     this.requestHandler = requestHandler;
-
-    this.leaseHandler = leaseHandler;
 
     // DO NOT Change the order here. The Send processor must be subscribed to before receiving
     // connections
@@ -81,9 +73,8 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
     connection.send(sendProcessor).subscribe(null, this::handleSendProcessorError);
 
     connection.receive().subscribe(this::handleFrame, e -> {});
-    leaseHandlerDisposable = leaseHandler.send(sendProcessor::onNextPrioritized);
 
-    this.connection
+    connection
         .onClose()
         .subscribe(null, this::tryTerminateOnConnectionError, this::tryTerminateOnConnectionClose);
   }
@@ -106,7 +97,7 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
     if (terminationError == null) {
       Throwable e = errorSupplier.get();
       if (TERMINATION_ERROR.compareAndSet(this, null, e)) {
-        cleanup(e);
+        doOnDispose(e);
       }
     }
   }
@@ -114,12 +105,7 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
   @Override
   public Mono<Void> fireAndForget(Payload payload) {
     try {
-      if (leaseHandler.useLease()) {
-        return requestHandler.fireAndForget(payload);
-      } else {
-        payload.release();
-        return Mono.error(leaseHandler.leaseError());
-      }
+      return requestHandler.fireAndForget(payload);
     } catch (Throwable t) {
       return Mono.error(t);
     }
@@ -128,12 +114,7 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
   @Override
   public Mono<Payload> requestResponse(Payload payload) {
     try {
-      if (leaseHandler.useLease()) {
-        return requestHandler.requestResponse(payload);
-      } else {
-        payload.release();
-        return Mono.error(leaseHandler.leaseError());
-      }
+      return requestHandler.requestResponse(payload);
     } catch (Throwable t) {
       return Mono.error(t);
     }
@@ -142,12 +123,7 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
   @Override
   public Flux<Payload> requestStream(Payload payload) {
     try {
-      if (leaseHandler.useLease()) {
-        return requestHandler.requestStream(payload);
-      } else {
-        payload.release();
-        return Flux.error(leaseHandler.leaseError());
-      }
+      return requestHandler.requestStream(payload);
     } catch (Throwable t) {
       return Flux.error(t);
     }
@@ -156,24 +132,7 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
   @Override
   public Flux<Payload> requestChannel(Publisher<Payload> payloads) {
     try {
-      if (leaseHandler.useLease()) {
-        return requestHandler.requestChannel(payloads);
-      } else {
-        return Flux.error(leaseHandler.leaseError());
-      }
-    } catch (Throwable t) {
-      return Flux.error(t);
-    }
-  }
-
-  private Flux<Payload> requestChannel(Payload payload, Publisher<Payload> payloads) {
-    try {
-      if (leaseHandler.useLease()) {
-        return requestHandler.requestChannel(payloads);
-      } else {
-        payload.release();
-        return Flux.error(leaseHandler.leaseError());
-      }
+      return requestHandler.requestChannel(payloads);
     } catch (Throwable t) {
       return Flux.error(t);
     }
@@ -203,11 +162,10 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
     return connection.onClose();
   }
 
-  private void cleanup(Throwable e) {
+  void doOnDispose(Throwable e) {
     cleanUpSendingSubscriptions();
 
     connection.dispose();
-    leaseHandlerDisposable.dispose();
     requestHandler.dispose();
     super.getSendProcessor().dispose();
   }
@@ -217,7 +175,7 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
     activeStreams.clear();
   }
 
-  private void handleFrame(ByteBuf frame) {
+  void handleFrame(ByteBuf frame) {
     try {
       int streamId = FrameHeaderCodec.streamId(frame);
       FrameHandler receiver;
@@ -312,7 +270,7 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
     }
   }
 
-  private void handleFireAndForget(int streamId, ByteBuf frame) {
+  void handleFireAndForget(int streamId, ByteBuf frame) {
     if (FrameHeaderCodec.hasFollows(frame)) {
       FireAndForgetResponderSubscriber subscriber =
           new FireAndForgetResponderSubscriber(streamId, frame, this, this);
@@ -324,7 +282,7 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
     }
   }
 
-  private void handleRequestResponse(int streamId, ByteBuf frame) {
+  void handleRequestResponse(int streamId, ByteBuf frame) {
     if (FrameHeaderCodec.hasFollows(frame)) {
       RequestResponseResponderSubscriber subscriber =
           new RequestResponseResponderSubscriber(streamId, frame, this, this);
@@ -340,7 +298,7 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
     }
   }
 
-  private void handleStream(int streamId, ByteBuf frame, long initialRequestN) {
+  void handleStream(int streamId, ByteBuf frame, long initialRequestN) {
     if (FrameHeaderCodec.hasFollows(frame)) {
       RequestStreamResponderSubscriber subscriber =
           new RequestStreamResponderSubscriber(streamId, initialRequestN, frame, this, this);
@@ -356,7 +314,7 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
     }
   }
 
-  private void handleChannel(int streamId, ByteBuf frame, long initialRequestN) {
+  void handleChannel(int streamId, ByteBuf frame, long initialRequestN) {
     if (FrameHeaderCodec.hasFollows(frame)) {
       RequestChannelResponderSubscriber subscriber =
           new RequestChannelResponderSubscriber(streamId, initialRequestN, frame, this, this);
@@ -368,16 +326,16 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
           new RequestChannelResponderSubscriber(streamId, initialRequestN, firstPayload, this);
 
       if (this.add(streamId, subscriber)) {
-        this.requestChannel(firstPayload, subscriber).subscribe(subscriber);
+        this.requestChannel(subscriber).subscribe(subscriber);
       }
     }
   }
 
-  private void handleMetadataPush(Mono<Void> result) {
+  final void handleMetadataPush(Mono<Void> result) {
     result.subscribe(MetadataPushResponderSubscriber.INSTANCE);
   }
 
-  private boolean add(int streamId, FrameHandler frameHandler) {
+  final boolean add(int streamId, FrameHandler frameHandler) {
     FrameHandler existingHandler;
     synchronized (this) {
       existingHandler = super.activeStreams.putIfAbsent(streamId, frameHandler);

@@ -406,7 +406,7 @@ public final class RSocketServer {
           Leases<?> leases = leaseEnabled ? leasesSupplier.get() : null;
           RequesterLeaseHandler requesterLeaseHandler =
               leaseEnabled
-                  ? new RequesterLeaseHandler.Impl(SERVER_TAG, leases.receiver())
+                  ? new RequesterLeaseHandler.Impl(SERVER_TAG, leases.leaseReceiver())
                   : RequesterLeaseHandler.None;
 
           RSocket rSocketRequester =
@@ -437,21 +437,26 @@ public final class RSocketServer {
                     RSocket wrappedRSocketHandler = interceptors.initResponder(rSocketHandler);
                     DuplexConnection connection = wrappedMultiplexer.asClientConnection();
 
-                    ResponderLeaseHandler responderLeaseHandler =
-                        leaseEnabled
-                            ? new ResponderLeaseHandler.Impl<>(
-                                SERVER_TAG, connection.alloc(), leases.sender(), leases.stats())
-                            : ResponderLeaseHandler.None;
-
-                    RSocket rSocketResponder =
-                        new RSocketResponder(
-                            connection,
-                            wrappedRSocketHandler,
-                            payloadDecoder,
-                            responderLeaseHandler,
-                            mtu,
-                            maxFrameLength,
-                            maxInboundPayloadSize);
+                    if (leaseEnabled) {
+                      new LeaseEnabledRSocketResponder(
+                          connection,
+                          wrappedRSocketHandler,
+                          payloadDecoder,
+                          new ResponderLeaseHandler.Impl(
+                              SERVER_TAG, connection.alloc(), leases.leaseSender()),
+                          leases.leaseTracker(),
+                          mtu,
+                          maxFrameLength,
+                          maxInboundPayloadSize);
+                    } else {
+                      new RSocketResponder(
+                          connection,
+                          wrappedRSocketHandler,
+                          payloadDecoder,
+                          mtu,
+                          maxFrameLength,
+                          maxInboundPayloadSize);
+                    }
                   })
               .doFinally(signalType -> setupPayload.release())
               .then();

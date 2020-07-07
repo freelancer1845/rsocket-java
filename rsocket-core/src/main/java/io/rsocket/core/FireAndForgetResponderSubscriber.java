@@ -22,11 +22,14 @@ import io.netty.util.ReferenceCountUtil;
 import io.rsocket.Payload;
 import io.rsocket.RSocket;
 import io.rsocket.frame.decoder.PayloadDecoder;
+import io.rsocket.lease.RequestTracker;
 import org.reactivestreams.Subscription;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.CoreSubscriber;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
+import reactor.util.annotation.Nullable;
 
 final class FireAndForgetResponderSubscriber
     implements CoreSubscriber<Void>, ResponderFrameHandler {
@@ -39,8 +42,10 @@ final class FireAndForgetResponderSubscriber
   final ByteBufAllocator allocator;
   final PayloadDecoder payloadDecoder;
   final RequesterResponderSupport requesterResponderSupport;
-  final RSocket handler;
   final int maxInboundPayloadSize;
+
+  final RSocket handler;
+  @Nullable final RequestTracker requestTracker;
 
   CompositeByteBuf frames;
 
@@ -51,6 +56,19 @@ final class FireAndForgetResponderSubscriber
     this.maxInboundPayloadSize = 0;
     this.requesterResponderSupport = null;
     this.handler = null;
+    this.requestTracker = null;
+    this.frames = null;
+  }
+
+  FireAndForgetResponderSubscriber(
+      int streamId, RequesterResponderSupport requesterResponderSupport) {
+    this.streamId = streamId;
+    this.allocator = null;
+    this.payloadDecoder = null;
+    this.maxInboundPayloadSize = 0;
+    this.requesterResponderSupport = null;
+    this.handler = null;
+    this.requestTracker = requesterResponderSupport.getRequestTracker();
     this.frames = null;
   }
 
@@ -65,6 +83,7 @@ final class FireAndForgetResponderSubscriber
     this.maxInboundPayloadSize = requesterResponderSupport.getMaxInboundPayloadSize();
     this.requesterResponderSupport = requesterResponderSupport;
     this.handler = handler;
+    this.requestTracker = requesterResponderSupport.getRequestTracker();
 
     this.frames =
         ReassemblyUtils.addFollowingFrame(
@@ -82,10 +101,19 @@ final class FireAndForgetResponderSubscriber
   @Override
   public void onError(Throwable t) {
     logger.debug("Dropped Outbound error", t);
+    final RequestTracker requestTracker = this.requestTracker;
+    if (requestTracker != null) {
+      requestTracker.onEnd(this.streamId, SignalType.ON_ERROR);
+    }
   }
 
   @Override
-  public void onComplete() {}
+  public void onComplete() {
+    final RequestTracker requestTracker = this.requestTracker;
+    if (requestTracker != null) {
+      requestTracker.onEnd(this.streamId, SignalType.ON_COMPLETE);
+    }
+  }
 
   @Override
   public void handleNext(ByteBuf followingFrame, boolean hasFollows, boolean isLastPayload) {
@@ -127,9 +155,16 @@ final class FireAndForgetResponderSubscriber
   public final void handleCancel() {
     final CompositeByteBuf frames = this.frames;
     if (frames != null) {
-      this.requesterResponderSupport.remove(this.streamId, this);
+      final int streamId = this.streamId;
+
+      this.requesterResponderSupport.remove(streamId, this);
       this.frames = null;
       frames.release();
+
+      final RequestTracker requestTracker = this.requestTracker;
+      if (requestTracker != null) {
+        requestTracker.onEnd(this.streamId, SignalType.CANCEL);
+      }
     }
   }
 }

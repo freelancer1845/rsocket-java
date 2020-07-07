@@ -36,6 +36,7 @@ import io.rsocket.frame.PayloadFrameCodec;
 import io.rsocket.frame.RequestNFrameCodec;
 import io.rsocket.frame.decoder.PayloadDecoder;
 import io.rsocket.internal.UnboundedProcessor;
+import io.rsocket.lease.RequestTracker;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
@@ -46,6 +47,8 @@ import reactor.core.CoreSubscriber;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Operators;
+import reactor.core.publisher.SignalType;
+import reactor.util.annotation.Nullable;
 import reactor.util.context.Context;
 
 final class RequestChannelResponderSubscriber extends Flux<Payload>
@@ -64,6 +67,7 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
   final long firstRequest;
 
   final RSocket handler;
+  @Nullable final RequestTracker requestTracker;
 
   volatile long state;
   static final AtomicLongFieldUpdater<RequestChannelResponderSubscriber> STATE =
@@ -101,6 +105,7 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
     this.payloadDecoder = requesterResponderSupport.getPayloadDecoder();
     this.handler = handler;
     this.firstRequest = firstRequestN;
+    this.requestTracker = requesterResponderSupport.getRequestTracker();
 
     this.frames =
         ReassemblyUtils.addFollowingFrame(
@@ -122,6 +127,7 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
     this.sendProcessor = requesterResponderSupport.getSendProcessor();
     this.payloadDecoder = requesterResponderSupport.getPayloadDecoder();
     this.firstRequest = firstRequestN;
+    this.requestTracker = requesterResponderSupport.getRequestTracker();
     this.firstPayload = firstPayload;
 
     this.handler = null;
@@ -292,6 +298,11 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
 
     if (isOutboundTerminated(previousState)) {
       this.requesterResponderSupport.remove(streamId, this);
+
+      final RequestTracker requestTracker = this.requestTracker;
+      if (requestTracker != null) {
+        requestTracker.onEnd(streamId, SignalType.ON_COMPLETE);
+      }
     }
 
     final ByteBuf cancelFrame = CancelFrameCodec.encode(this.allocator, streamId);
@@ -317,10 +328,23 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
         this.firstPayload = null;
         firstPayload.release();
       }
+
+      final RequestTracker requestTracker = this.requestTracker;
+      if (requestTracker != null) {
+        requestTracker.onEnd(streamId, SignalType.CANCEL);
+      }
       return;
     }
 
-    this.tryTerminate(true);
+    final long previousState = this.tryTerminate(true);
+    if (isTerminated(previousState) || isOutboundTerminated(previousState)) {
+      return;
+    }
+
+    final RequestTracker requestTracker = this.requestTracker;
+    if (requestTracker != null) {
+      requestTracker.onEnd(streamId, SignalType.CANCEL);
+    }
   }
 
   final long tryTerminate(boolean isFromInbound) {
@@ -431,6 +455,11 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
     // reached it
     // needs for disconnected upstream and downstream case
     this.outboundSubscription.cancel();
+
+    final RequestTracker requestTracker = this.requestTracker;
+    if (requestTracker != null) {
+      requestTracker.onEnd(streamId, SignalType.CANCEL);
+    }
   }
 
   @Override
@@ -445,6 +474,11 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
 
     if (isOutboundTerminated(previousState)) {
       this.requesterResponderSupport.remove(this.streamId, this);
+
+      final RequestTracker requestTracker = this.requestTracker;
+      if (requestTracker != null) {
+        requestTracker.onEnd(streamId, SignalType.ON_COMPLETE);
+      }
     }
 
     if (isFirstFrameSent(previousState)) {
@@ -472,11 +506,15 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
 
         this.outboundDone = true;
         // send error to terminate interaction
+        final int streamId = this.streamId;
         final ByteBuf errorFrame =
-            ErrorFrameCodec.encode(
-                this.allocator, this.streamId, new CanceledException(t.getMessage()));
+            ErrorFrameCodec.encode(this.allocator, streamId, new CanceledException(t.getMessage()));
         this.sendProcessor.onNext(errorFrame);
 
+        final RequestTracker requestTracker = this.requestTracker;
+        if (requestTracker != null) {
+          requestTracker.onEnd(streamId, SignalType.ON_ERROR);
+        }
         return;
       }
 
@@ -518,13 +556,18 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
 
         this.outboundDone = true;
         // send error to terminate interaction
+        final int streamId = this.streamId;
         final ByteBuf errorFrame =
             ErrorFrameCodec.encode(
                 this.allocator,
-                this.streamId,
+                streamId,
                 new CanceledException("Failed to reassemble payload. Cause: " + e.getMessage()));
         this.sendProcessor.onNext(errorFrame);
 
+        final RequestTracker requestTracker = this.requestTracker;
+        if (requestTracker != null) {
+          requestTracker.onEnd(streamId, SignalType.ON_ERROR);
+        }
         return;
       }
     }
@@ -551,13 +594,18 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
         }
 
         // send error to terminate interaction
+        final int streamId = this.streamId;
         final ByteBuf errorFrame =
             ErrorFrameCodec.encode(
                 this.allocator,
-                this.streamId,
+                streamId,
                 new CanceledException("Failed to reassemble payload. Cause: " + t.getMessage()));
         this.sendProcessor.onNext(errorFrame);
 
+        final RequestTracker requestTracker = this.requestTracker;
+        if (requestTracker != null) {
+          requestTracker.onEnd(streamId, SignalType.ON_ERROR);
+        }
         return;
       }
 
@@ -586,12 +634,6 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
     final UnboundedProcessor<ByteBuf> sender = this.sendProcessor;
     final ByteBufAllocator allocator = this.allocator;
 
-    if (p == null) {
-      final ByteBuf completeFrame = PayloadFrameCodec.encodeComplete(allocator, streamId);
-      sender.onNext(completeFrame);
-      return;
-    }
-
     final int mtu = this.mtu;
     try {
       if (!isValid(mtu, this.maxFrameLength, p, false)) {
@@ -615,6 +657,11 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
                 new CanceledException(
                     String.format(INVALID_PAYLOAD_ERROR_MESSAGE, this.maxFrameLength)));
         sender.onNext(errorFrame);
+
+        final RequestTracker requestTracker = this.requestTracker;
+        if (requestTracker != null) {
+          requestTracker.onEnd(streamId, SignalType.ON_ERROR);
+        }
         return;
       }
     } catch (IllegalReferenceCountException e) {
@@ -633,6 +680,11 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
               streamId,
               new CanceledException("Failed to validate payload. Cause:" + e.getMessage()));
       sender.onNext(errorFrame);
+
+      final RequestTracker requestTracker = this.requestTracker;
+      if (requestTracker != null) {
+        requestTracker.onEnd(streamId, SignalType.ON_ERROR);
+      }
       return;
     }
 
@@ -641,7 +693,16 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
     } catch (Throwable t) {
       // FIXME: must be scheduled on the connection event-loop to achieve serial
       //  behaviour on the inbound subscriber
-      this.tryTerminate(false);
+      final long previousState = this.tryTerminate(false);
+      if (isTerminated(previousState) || isOutboundTerminated(previousState)) {
+        Operators.onErrorDropped(t, this.inboundSubscriber.currentContext());
+        return;
+      }
+
+      final RequestTracker requestTracker = this.requestTracker;
+      if (requestTracker != null) {
+        requestTracker.onEnd(streamId, SignalType.ON_ERROR);
+      }
     }
   }
 
@@ -700,6 +761,11 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
 
     final ByteBuf errorFrame = ErrorFrameCodec.encode(this.allocator, streamId, t);
     this.sendProcessor.onNext(errorFrame);
+
+    final RequestTracker requestTracker = this.requestTracker;
+    if (requestTracker != null) {
+      requestTracker.onEnd(streamId, SignalType.ON_ERROR);
+    }
   }
 
   @Override
@@ -719,6 +785,11 @@ final class RequestChannelResponderSubscriber extends Flux<Payload>
 
     if (isInboundTerminated(previousState)) {
       this.requesterResponderSupport.remove(streamId, this);
+
+      final RequestTracker requestTracker = this.requestTracker;
+      if (requestTracker != null) {
+        requestTracker.onEnd(streamId, SignalType.ON_COMPLETE);
+      }
     }
 
     final ByteBuf completeFrame = PayloadFrameCodec.encodeComplete(this.allocator, streamId);

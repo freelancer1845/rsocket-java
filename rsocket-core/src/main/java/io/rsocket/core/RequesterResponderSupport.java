@@ -6,6 +6,7 @@ import io.netty.util.collection.IntObjectHashMap;
 import io.netty.util.collection.IntObjectMap;
 import io.rsocket.frame.decoder.PayloadDecoder;
 import io.rsocket.internal.UnboundedProcessor;
+import io.rsocket.lease.RequestTracker;
 import reactor.util.annotation.Nullable;
 
 class RequesterResponderSupport {
@@ -61,6 +62,11 @@ class RequesterResponderSupport {
 
   public UnboundedProcessor<ByteBuf> getSendProcessor() {
     return sendProcessor;
+  }
+
+  @Nullable
+  public RequestTracker getRequestTracker() {
+    return null;
   }
 
   /**

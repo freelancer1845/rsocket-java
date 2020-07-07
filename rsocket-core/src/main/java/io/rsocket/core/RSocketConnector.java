@@ -30,9 +30,8 @@ import io.rsocket.SocketAcceptor;
 import io.rsocket.frame.SetupFrameCodec;
 import io.rsocket.frame.decoder.PayloadDecoder;
 import io.rsocket.keepalive.KeepAliveHandler;
-import io.rsocket.lease.LeaseSender;
-import io.rsocket.lease.LeaseTracker;
 import io.rsocket.lease.Leases;
+import io.rsocket.lease.RequestTracker;
 import io.rsocket.lease.RequesterLeaseHandler;
 import io.rsocket.lease.ResponderLeaseHandler;
 import io.rsocket.plugins.InitializingInterceptorRegistry;
@@ -620,7 +619,7 @@ public class RSocketConnector {
                             new ClientServerInputMultiplexer(wrappedConnection, interceptors, true);
 
                         boolean leaseEnabled = leasesSupplier != null;
-                        Leases<? extends LeaseTracker> leases =
+                        Leases<? extends RequestTracker> leases =
                             leaseEnabled ? leasesSupplier.get() : null;
                         RequesterLeaseHandler requesterLeaseHandler =
                             leaseEnabled
@@ -670,24 +669,29 @@ public class RSocketConnector {
                                   RSocket wrappedRSocketHandler =
                                       interceptors.initResponder(rSocketHandler);
 
-                                  ResponderLeaseHandler responderLeaseHandler =
-                                      leaseEnabled
-                                          ? new ResponderLeaseHandler.Impl<>(
-                                              CLIENT_TAG,
-                                              wrappedConnection.alloc(),
-                                              (LeaseSender<LeaseTracker>) leases.leaseSender(),
-                                              leases.leaseTracker())
-                                          : ResponderLeaseHandler.None;
+                                  if (leaseEnabled) {
+                                    new LeaseEnabledRSocketResponder(
+                                        multiplexer.asServerConnection(),
+                                        wrappedRSocketHandler,
+                                        payloadDecoder,
+                                        new ResponderLeaseHandler.Impl(
+                                            CLIENT_TAG,
+                                            wrappedConnection.alloc(),
+                                            leases.leaseSender()),
+                                        leases.leaseTracker(),
+                                        mtu,
+                                        maxFrameLength,
+                                        maxInboundPayloadSize);
 
-                                  RSocket rSocketResponder =
-                                      new RSocketResponder(
-                                          multiplexer.asServerConnection(),
-                                          wrappedRSocketHandler,
-                                          payloadDecoder,
-                                          responderLeaseHandler,
-                                          mtu,
-                                          maxFrameLength,
-                                          maxInboundPayloadSize);
+                                  } else {
+                                    new RSocketResponder(
+                                        multiplexer.asServerConnection(),
+                                        wrappedRSocketHandler,
+                                        payloadDecoder,
+                                        mtu,
+                                        maxFrameLength,
+                                        maxInboundPayloadSize);
+                                  }
 
                                   return wrappedConnection
                                       .sendOne(setupFrame.retain())
