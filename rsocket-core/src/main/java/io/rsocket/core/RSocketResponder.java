@@ -193,7 +193,11 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
           break;
         case REQUEST_CHANNEL:
           long channelInitialRequestN = RequestChannelFrameCodec.initialRequestN(frame);
-          handleChannel(streamId, frame, channelInitialRequestN);
+          handleChannel(streamId, frame, channelInitialRequestN, false);
+          break;
+        case REQUEST_CHANNEL_COMPLETE:
+          long completeChannelInitialRequestN = RequestChannelFrameCodec.initialRequestN(frame);
+          handleChannel(streamId, frame, completeChannelInitialRequestN, true);
           break;
         case METADATA_PUSH:
           handleMetadataPush(metadataPush(super.getPayloadDecoder().apply(frame)));
@@ -314,7 +318,7 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
     }
   }
 
-  void handleChannel(int streamId, ByteBuf frame, long initialRequestN) {
+  void handleChannel(int streamId, ByteBuf frame, long initialRequestN, boolean complete) {
     if (FrameHeaderCodec.hasFollows(frame)) {
       RequestChannelResponderSubscriber subscriber =
           new RequestChannelResponderSubscriber(streamId, initialRequestN, frame, this, this);
@@ -327,6 +331,9 @@ class RSocketResponder extends RequesterResponderSupport implements RSocket {
 
       if (this.add(streamId, subscriber)) {
         this.requestChannel(subscriber).subscribe(subscriber);
+        if (complete) {
+          subscriber.handleComplete();
+        }
       }
     }
   }
