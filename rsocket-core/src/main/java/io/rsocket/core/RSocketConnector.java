@@ -184,7 +184,7 @@ public class RSocketConnector {
    * <ul>
    *   <li>{@link io.rsocket.metadata.CompositeMetadataFlyweight Composite Metadata}
    *   <li>{@link io.rsocket.metadata.TaggingMetadataFlyweight Routing}
-   *   <li>{@link io.rsocket.metadata.security.AuthMetadataFlyweight Authentication}
+   *   <li>{@link io.rsocket.metadata.AuthMetadataCodec Authentication}
    * </ul>
    *
    * <p>For more on the above metadata formats, see the corresponding <a
