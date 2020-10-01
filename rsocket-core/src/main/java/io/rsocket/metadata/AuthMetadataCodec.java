@@ -37,7 +37,8 @@ public class AuthMetadataCodec {
     }
     if (actualASCIILength < 1 || actualASCIILength > 128) {
       throw new IllegalArgumentException(
-          "custom auth type must have a strictly positive length that fits on 7 unsigned bits, ie 1-128");
+          "custom auth type must have a strictly positive length that fits on 7 unsigned bits, ie"
+              + " 1-128");
     }
 
     int capacity = 1 + actualASCIILength;
@@ -235,8 +236,8 @@ public class AuthMetadataCodec {
   }
 
   /**
-   * Read up to 65537 {@code bytes} from the given {@link ByteBuf} where the first two bytes represent username
-   * length and the subsequent number of bytes equal to read length
+   * Read up to 65537 {@code bytes} from the given {@link ByteBuf} where the first two bytes
+   * represent username length and the subsequent number of bytes equal to read length
    *
    * @param simpleAuthMetadata the given metadata to read username from. Please note, the {@code
    *     simpleAuthMetadata#readIndex} should be set to the username length position
@@ -268,8 +269,8 @@ public class AuthMetadataCodec {
     return simpleAuthMetadata.readSlice(simpleAuthMetadata.readableBytes());
   }
   /**
-   * Read up to 65537 {@code bytes} from the given {@link ByteBuf} where the first two bytes represent username
-   * length and the subsequent number of bytes equal to read length
+   * Read up to 65537 {@code bytes} from the given {@link ByteBuf} where the first two bytes
+   * represent username length and the subsequent number of bytes equal to read length
    *
    * @param simpleAuthMetadata the given metadata to read username from. Please note, the {@code
    *     simpleAuthMetadata#readIndex} should be set to the username length byte
